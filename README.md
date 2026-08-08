@@ -32,7 +32,7 @@ While the data pipeline includes dynamic column mapping and default feature padd
 
 ### 📬 Found a bug or running a new dataset?
 If you encounter an error while uploading a custom dataset that's completely normal:
-1. **Open an Issue:** Submit a bug report on the repository's **Issues** tab. Or reach out directly at my [Gmail](mohammedlotfyismail@gmail.com).
+1. **Open an Issue:** Submit a bug report on the repository's **Issues** tab. Or Reach out directly via [Gmail](https://mail.google.com/mail/?view=cm&fs=1&to=mohammedlotfyismail@gmail.com)
 3. **What to include:**
    * A snippet or sample row of your dataset's header columns.
    * The exact error message / traceback displayed on Streamlit.
