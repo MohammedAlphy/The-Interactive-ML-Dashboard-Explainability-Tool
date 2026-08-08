@@ -108,17 +108,30 @@ model_artifact = load_model_artifact()
 
 
 def align_df_to_preprocessor(df, preprocessor):
-    """Fills missing columns expected by the fitted preprocessor with np.nan and aligns feature order."""
+    """Fills missing model features with appropriate default types and aligns column order."""
     if preprocessor is not None and hasattr(preprocessor, "feature_names_in_"):
         expected_cols = list(preprocessor.feature_names_in_)
         df_aligned = df.copy()
 
-        # Add missing columns with NaN values
+        # Identify categorical columns from the transformer pipeline
+        cat_cols = set()
+        if hasattr(preprocessor, "transformers_"):
+            for name, trans, cols in preprocessor.transformers_:
+                if name == "remainder" and trans == "drop":
+                    continue
+                cols_list = cols if isinstance(cols, list) else [cols]
+                trans_name = f"{type(trans).__name__} {name}".lower()
+                if any(k in trans_name for k in ["onehot", "cat", "encoder", "string"]):
+                    cat_cols.update(cols_list)
+
+        # Pad missing features with string fallback for encodings and np.nan for numeric scaling
         for col in expected_cols:
             if col not in df_aligned.columns:
-                df_aligned[col] = np.nan
+                if col in cat_cols:
+                    df_aligned[col] = "Missing"
+                else:
+                    df_aligned[col] = np.nan
 
-        # Match exact training feature ordering
         return df_aligned[expected_cols]
 
     return df
