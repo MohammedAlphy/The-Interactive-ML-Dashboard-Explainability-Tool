@@ -2,6 +2,11 @@
 
 An end-to-end Streamlit web application that predicts customer churn risk, delivers regional sales analytics, and explains model decisions using **SHAP (SHapley Additive exPlanations)**.
 
+## 🌐 Live app
+
+The interactive dashboard is live and hosted on Streamlit Community Cloud:  
+👉 **[Launch the Live Dashboard](https://the-ml-e-commerce-transactions-tool.streamlit.app/)**
+> 💬 **Your feedback helps me upgrade and improve the tool!** Feel free to test custom datasets, report edge cases, or share feature requests.
 
 ## 🚀 Key Features
 * **Universal Column Mapping:** Built-in standardization that dynamically normalizes mismatched
@@ -31,7 +36,7 @@ If you encounter an error while uploading a custom dataset that's completely nor
 3. **What to include:**
    * A snippet or sample row of your dataset's header columns.
    * The exact error message / traceback displayed on Streamlit.
-
+Your FeedBack helps me 
 ---
 
 ### 🛠️ Project Structure
