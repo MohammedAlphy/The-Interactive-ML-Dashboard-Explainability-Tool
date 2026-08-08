@@ -5,96 +5,208 @@ import pandas as pd
 import shap
 import streamlit as st
 
-
-
-# Force Streamlit to display immediate text to verify execution
-st.write("### App is initializing...")
-
-
-@st.cache_resource
-def load_artifacts():
-    # Make sure this matches the exact filename saved by joblib
-    artifacts = joblib.load("churn_model_pipeline.pkl")
-    return (
-        artifacts["model"],
-        artifacts["preprocessor"],
-        artifacts["feature_names"],
-    )
-
-
-# Debug block: Print exact error to browser instead of calling st.stop() silently
-try:
-    model, preprocessor, feature_names = load_artifacts()
-    st.success("Model loaded successfully!")
-except Exception as e:
-    st.error(f"Failed to load 'churn_model_pipeline.pkl': {e}")
-    # Comment out st.stop() temporarily to inspect if the rest of the UI renders
-    # st.stop()
-
-
-# Import existing helper functions from pipeline.py
+# Import pipeline helpers
 from pipeline import engineer_features, load_and_clean_data
 
-# Set page configuration
+# ==========================================
+# Page Configuration
+# ==========================================
 st.set_page_config(
-    page_title="Customer Churn & Explainability Dashboard",
+    page_title="Customer Churn & Intelligence Dashboard",
+    page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+)
+
+st.title("📊 Customer Churn Intelligence & Explainability Dashboard")
+st.markdown(
+    "Upload a customer transaction dataset to analyze financial risk, explore country/category insights, and explain machine learning predictions using **SHAP**."
 )
 
 
 # ==========================================
-# 1. Load Pre-trained Model Artifacts
+# Universal Column Standardization
+# ==========================================
+def standardize_columns(df):
+    """Maps common e-commerce column aliases across dataset formats to standard project names."""
+    column_mapping = {
+        # Revenue / Amount
+        "totalamount": "Purchase_Amount",
+        "revenue": "Purchase_Amount",
+        "sales": "Purchase_Amount",
+        "amount": "Purchase_Amount",
+        "price": "Purchase_Amount",
+        "unitprice": "Purchase_Amount",
+        # Geography / Country
+        "region": "Country",
+        "countryname": "Country",
+        "location": "Country",
+        "country": "Country",
+        # User Identifier
+        "customerid": "User_Name",
+        "customername": "User_Name",
+        "userid": "User_Name",
+        "clientid": "User_Name",
+        "username": "User_Name",
+        # Category
+        "productcategory": "Product_Category",
+        "category": "Product_Category",
+        # Dates & IDs
+        "orderdate": "Transaction_Date",
+        "date": "Transaction_Date",
+        "transactiondate": "Transaction_Date",
+        "orderid": "Transaction_ID",
+        "transactionid": "Transaction_ID",
+        "invoiceno": "Transaction_ID",
+        # Demographics, Payment & Offers
+        "age": "Age",
+        "customerage": "Age",
+        "discount": "Is_Discounted",
+        "isdiscounted": "Is_Discounted",
+        "paymentmethod": "Payment_Method",
+        "paymethod": "Payment_Method",
+        "paymenttype": "Payment_Method",
+    }
+
+    # Normalize current column names (lowercase, no spaces, no underscores)
+    current_cols = {
+        str(col).lower().replace("_", "").replace(" ", "").strip(): col
+        for col in df.columns
+    }
+
+    rename_dict = {}
+    assigned_targets = set()
+
+    for src_alias, target_col in column_mapping.items():
+        if src_alias in current_cols and target_col not in assigned_targets:
+            orig_col = current_cols[src_alias]
+            if orig_col == target_col:
+                assigned_targets.add(target_col)
+                continue
+            rename_dict[orig_col] = target_col
+            assigned_targets.add(target_col)
+
+    df = df.rename(columns=rename_dict)
+
+    # Safely convert Transaction_Date to datetime
+    if "Transaction_Date" in df.columns:
+        df["Transaction_Date"] = pd.to_datetime(
+            df["Transaction_Date"], errors="coerce"
+        )
+
+    return df
+
+
+# ==========================================
+# Load Model Artifacts & Alignment Helpers
 # ==========================================
 @st.cache_resource
-def load_artifacts():
-    artifacts = joblib.load("churn_model_pipeline.pkl")
-    return (
-        artifacts["model"],
-        artifacts["preprocessor"],
-        artifacts["feature_names"],
+def load_model_artifact():
+    return joblib.load("churn_model_pipeline.pkl")
+
+
+model_artifact = load_model_artifact()
+
+
+def align_df_to_preprocessor(df, preprocessor):
+    """Fills missing columns expected by the fitted preprocessor with np.nan and aligns feature order."""
+    if preprocessor is not None and hasattr(preprocessor, "feature_names_in_"):
+        expected_cols = list(preprocessor.feature_names_in_)
+        df_aligned = df.copy()
+
+        # Add missing columns with NaN values
+        for col in expected_cols:
+            if col not in df_aligned.columns:
+                df_aligned[col] = np.nan
+
+        # Match exact training feature ordering
+        return df_aligned[expected_cols]
+
+    return df
+
+
+def get_predictions_and_shap_data(artifact, df):
+    """Safely aligns features, transforms data, and generates model predictions."""
+    df_features = df.drop(
+        columns=["Churn_Probability", "Predicted_Churn"], errors="ignore"
     )
 
+    # Case A: Artifact is a dictionary containing preprocessor and model
+    if isinstance(artifact, dict):
+        preprocessor = artifact.get("preprocessor")
+        model = (
+            artifact.get("model")
+            or artifact.get("classifier")
+            or artifact.get("pipeline")
+        )
 
-try:
-    model, preprocessor, feature_names = load_artifacts()
-    explainer = shap.TreeExplainer(model)
-except Exception as e:
-    st.error(
-        f"Error loading model artifacts. Make sure 'churn_model_pipeline.pkl' exists. Details: {e}"
-    )
-    st.stop()
+        if preprocessor is not None:
+            df_aligned = align_df_to_preprocessor(df_features, preprocessor)
+            X_trans = preprocessor.transform(df_aligned)
+            probs = model.predict_proba(X_trans)[:, 1]
+            return probs, preprocessor, model, X_trans
+        else:
+            df_cat = df_features.copy()
+            for col in df_cat.select_dtypes(include=["object"]).columns:
+                df_cat[col] = df_cat[col].astype("category")
+            probs = model.predict_proba(df_cat)[:, 1]
+            return probs, None, model, df_cat
+
+    # Case B: Artifact is a Scikit-Learn Pipeline
+    elif hasattr(artifact, "named_steps"):
+        preprocessor = artifact.named_steps.get("preprocessor")
+        model = artifact.named_steps.get("classifier", artifact)
+
+        if preprocessor is not None:
+            df_aligned = align_df_to_preprocessor(df_features, preprocessor)
+            X_trans = preprocessor.transform(df_aligned)
+            probs = model.predict_proba(X_trans)[:, 1]
+        else:
+            probs = artifact.predict_proba(df_features)[:, 1]
+            X_trans = df_features
+
+        return probs, preprocessor, model, X_trans
+
+    # Case C: Standalone Model
+    else:
+        df_cat = df_features.copy()
+        for col in df_cat.select_dtypes(include=["object"]).columns:
+            df_cat[col] = df_cat[col].astype("category")
+        probs = artifact.predict_proba(df_cat)[:, 1]
+        return probs, None, artifact, df_cat
+
 
 # ==========================================
-# 2. Sidebar Controls
+# Sidebar Controls
 # ==========================================
-st.sidebar.title("Dashboard Controls")
-
-# File Uploader
+st.sidebar.header("⚙️ Configuration")
 uploaded_file = st.sidebar.file_uploader(
-    "Upload Client CSV Dataset", type=["csv"]
+    "Upload Customer CSV Dataset", type=["csv"]
 )
 
-# Probability Sensitivity Threshold
 threshold = st.sidebar.slider(
-    "Prediction Sensitivity Threshold",
-    min_value=0.0,
-    max_value=1.0,
+    "Churn Probability Risk Threshold",
+    min_value=0.1,
+    max_value=0.9,
     value=0.5,
     step=0.05,
-    help="Customers with predicted churn probability above this threshold are classified as At-Risk.",
+    help="Customers with a predicted churn probability above this threshold will be flagged as high risk.",
 )
 
 # ==========================================
-# 3. Main Dashboard Layout
+# Main Dashboard Execution
 # ==========================================
-st.title("📊 Customer Churn Intelligence & Explainability Dashboard")
-
 if uploaded_file is not None:
-    # Read raw data
+    # 1. Read Raw CSV Stream Once & Standardize
     raw_df = pd.read_csv(uploaded_file)
+    raw_df = standardize_columns(raw_df)
 
-    # --- Dataset Insights Section ---
+    # 2. Defensive Age Binning (Only if 'Age' column exists)
+    if "Age" in raw_df.columns:
+        bins = [17, 25, 35, 50, 65, 100]
+        labels = ["18-25", "26-35", "36-50", "51-65", "65+"]
+        raw_df["Age_Group"] = pd.cut(raw_df["Age"], bins=bins, labels=labels)
+
+    # --- Dataset Overview Section ---
     st.subheader("📌 Dataset Insights & Overview")
 
     col1, col2, col3 = st.columns(3)
@@ -113,218 +225,208 @@ if uploaded_file is not None:
         avg_freq = raw_df.groupby("User_Name")["Transaction_ID"].count().mean()
         st.metric("Avg. Trans Frequency / User", f"{avg_freq:.1f}")
 
-    # Country Filters in Sidebar
+    # Sidebar Country Filter
     all_countries = ["All"] + list(raw_df["Country"].unique())
     selected_country = st.sidebar.selectbox("Filter by Country", all_countries)
 
-    filtered_raw_df = raw_df.copy()
     if selected_country != "All":
-        filtered_raw_df = filtered_raw_df[
-            filtered_raw_df["Country"] == selected_country
-        ]
-
-    # Process features using pipeline
-    uploaded_file.seek(0)
-    processed_df = load_and_clean_data(uploaded_file)
-    featured_df = engineer_features(processed_df)
-
-    if selected_country != "All":
-        featured_df = featured_df[featured_df["Country"] == selected_country]
-
-    # Preprocess & Predict Probabilities
-    X_prep = preprocessor.transform(featured_df)
-    X_prep_df = pd.DataFrame(
-        X_prep, columns=feature_names, index=featured_df.index
-    )
-
-    # Get positive class probabilities
-    probabilities = model.predict_proba(X_prep_df)[:, 1]
-    featured_df["Churn_Probability"] = probabilities
-    featured_df["Predicted_At_Risk"] = (probabilities >= threshold).astype(int)
-
-    # --- Real-Time Summary Metric Cards ---
-    st.subheader("⚡ Risk Metrics")
-
-    at_risk_count = featured_df["Predicted_At_Risk"].sum()
-    potential_revenue_loss = featured_df[featured_df["Predicted_At_Risk"] == 1][
-        "avg_spending_per_trans"
-    ].sum()
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total Analyzed Customers", len(featured_df))
-    m2.metric(
-        "At-Risk Customers",
-        f"{at_risk_count}",
-        f"{(at_risk_count/len(featured_df))*100:.1f}%",
-    )
-    m3.metric("Potential Revenue Loss", f"${potential_revenue_loss:,.2f}")
-
-    # --- Interactive SHAP Waterfall Section ---
-    st.markdown("---")
-    st.subheader("🔍 Local Explainability (Individual Customer Drivers)")
-
-    customer_options = featured_df.index.tolist()
-    selected_customer_idx = st.selectbox(
-        "Select Customer Row Index to Explain:", customer_options
-    )
-
-    if selected_customer_idx is not None:
-        row_pos = featured_df.index.get_loc(selected_customer_idx)
-
-        st.write(
-            f"**Predicted Churn Probability:** `{probabilities[row_pos]:.2%}`"
+        raw_df = raw_df[raw_df["Country"] == selected_country].reset_index(
+            drop=True
         )
 
-        # Compute SHAP
-        shap_values = explainer(X_prep_df)
+    # --- Advanced Analytics Section ---
+    st.markdown("---")
+    st.subheader("📈 Country & Category Deep-Dive")
 
-        fig, ax = plt.subplots(figsize=(8, 4))
-        shap.plots.waterfall(shap_values[row_pos], max_display=7, show=False)
-        plt.tight_layout()
+    tab1, tab2, tab3 = st.tabs(
+        [
+            "🌍 Country Breakdown",
+            "🏆 Top Customer per Category",
+            "💡 Targeted Recommendations",
+        ]
+    )
 
+    with tab1:
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            st.write("**Top Spending Age Bracket per Country**")
+            if "Age_Group" in raw_df.columns:
+                age_country = (
+                    raw_df.groupby(["Country", "Age_Group"], observed=False)[
+                        "Purchase_Amount"
+                    ]
+                    .sum()
+                    .reset_index()
+                )
+                top_age_country = age_country.loc[
+                    age_country.groupby("Country")["Purchase_Amount"].idxmax()
+                ]
+                st.dataframe(
+                    top_age_country.rename(
+                        columns={
+                            "Age_Group": "Top Age Bracket",
+                            "Purchase_Amount": "Total Spend ($)",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info(
+                    "ℹ️ Uploaded dataset does not contain customer age data."
+                )
+
+        with col_b:
+            st.write("**Top Product Category per Country**")
+            cat_country = (
+                raw_df.groupby(["Country", "Product_Category"])[
+                    "Purchase_Amount"
+                ]
+                .sum()
+                .reset_index()
+            )
+            top_cat_country = cat_country.loc[
+                cat_country.groupby("Country")["Purchase_Amount"].idxmax()
+            ]
+            st.dataframe(
+                top_cat_country.rename(
+                    columns={
+                        "Product_Category": "Top Category",
+                        "Purchase_Amount": "Total Spend ($)",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tab2:
+        user_cat_freq = (
+            raw_df.groupby(["Product_Category", "User_Name"])["Transaction_ID"]
+            .count()
+            .reset_index()
+        )
+        top_user_per_cat = user_cat_freq.loc[
+            user_cat_freq.groupby("Product_Category")["Transaction_ID"].idxmax()
+        ]
+
+        st.write("**Most Frequent Buyer per Product Category**")
+        st.dataframe(
+            top_user_per_cat.rename(
+                columns={
+                    "User_Name": "Top Buyer",
+                    "Transaction_ID": "Transaction Count",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tab3:
+        st.write("### 🤖 Customer Action & Ad Targeting Guidance")
+        selected_user_guide = st.selectbox(
+            "Select Customer Account to Generate Recommendations:",
+            raw_df["User_Name"].unique(),
+            key="user_guide_select",
+        )
+
+        user_data = raw_df[raw_df["User_Name"] == selected_user_guide]
+
+        category_counts = user_data["Product_Category"].value_counts(
+            normalize=True
+        )
+        top_category = category_counts.index[0]
+        top_category_pct = category_counts.iloc[0]
+
+        st.info(
+            f"Analyzing behavioral profile for **{selected_user_guide}**..."
+        )
+
+        if top_category_pct >= 0.25:
+            st.success(
+                f"🎯 **Targeted Ad Alert:** Customer spends `{top_category_pct:.1%}` of their transactions on **{top_category}**. "
+                f"Action: Serve targeted ads and promotions for high-margin items in **{top_category}**."
+            )
+
+        if "Is_Discounted" in user_data.columns:
+            discount_ratio = user_data["Is_Discounted"].mean()
+            if discount_ratio > 0.5:
+                st.warning(
+                    f"🏷️ **Deal-Seeker Profile:** `{discount_ratio:.1%}` of purchases were promotional. "
+                    f"Action: Enroll customer in automated SMS/Email sale notifications."
+                )
+            else:
+                st.success(
+                    "💎 **Full-Price Buyer:** Customer rarely uses discounts. Action: Direct target with early-access premium collections."
+                )
+        else:
+            st.caption(
+                "💡 *Note: Include an `Is_Discounted` or `Offer_Code` column to unlock discount sensitivity rules.*"
+            )
+
+    # --- ML Churn Prediction & Risk Evaluation ---
+    st.markdown("---")
+    st.subheader("🤖 Churn Predictions & Risk Evaluation")
+
+    # Reset stream pointer for pipeline consumption
+    uploaded_file.seek(0)
+    processed_df = load_and_clean_data(uploaded_file)
+    processed_df = standardize_columns(processed_df)
+
+    featured_df = engineer_features(processed_df)
+
+    # Generate Model Predictions safely via helper
+    churn_probs, preprocessor, xgb_model, transformed_features = (
+        get_predictions_and_shap_data(model_artifact, featured_df)
+    )
+
+    featured_df["Churn_Probability"] = churn_probs
+    featured_df["Predicted_Churn"] = (churn_probs >= threshold).astype(int)
+
+    # Risk Metrics
+    high_risk_count = featured_df["Predicted_Churn"].sum()
+    at_risk_revenue = raw_df[
+        raw_df["User_Name"].isin(
+            featured_df[featured_df["Predicted_Churn"] == 1].index
+        )
+    ]["Purchase_Amount"].sum()
+
+    m_col1, m_col2, m_col3 = st.columns(3)
+    m_col1.metric("Analyzed Customers", len(featured_df))
+    m_col2.metric("Flagged High-Risk Customers", high_risk_count)
+    m_col3.metric("Estimated Revenue at Risk", f"${at_risk_revenue:,.2f}")
+
+    # Risk Directory Table
+    st.write("### 📋 Customer Risk Directory")
+    st.dataframe(
+        featured_df[["Churn_Probability", "Predicted_Churn"]].sort_values(
+            by="Churn_Probability", ascending=False
+        ),
+        use_container_width=True,
+    )
+
+    # --- SHAP Explainability Section ---
+    st.markdown("---")
+    st.subheader("🔍 Local Model Interpretability (SHAP Waterfall)")
+
+    selected_account = st.selectbox(
+        "Select Customer Account to Explain Churn Decision:",
+        featured_df.index.unique(),
+    )
+
+    if selected_account is not None:
+        account_idx = featured_df.index.get_loc(selected_account)
+
+        # Compute SHAP values using transformed features
+        explainer = shap.TreeExplainer(xgb_model)
+        shap_values = explainer(transformed_features)
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        shap.plots.waterfall(shap_values[account_idx], show=False)
         st.pyplot(fig)
 
 else:
-    st.info("👈 Please upload a CSV file in the sidebar to begin analysis.")
-
-
-# ==========================================
-# Advanced Country & Category Analytics
-# ==========================================
-st.markdown("---")
-st.subheader("📈 Country & Category Deep-Dive")
-
-tab1, tab2, tab3 = st.tabs(
-    [
-        "🌍 Country Breakdown",
-        "🏆 Top Customer per Category",
-        "💡 Targeted Recommendations",
-    ]
-)
-
-with tab1:
-    col_a, col_b = st.columns(2)
-
-    # 1. Age Group that buys the most per country
-    bins = [17, 25, 35, 50, 65, 100]
-    labels = ["18-25", "26-35", "36-50", "51-65", "65+"]
-    raw_df["Age_Group"] = pd.cut(raw_df["Age"], bins=bins, labels=labels)
-
-    age_country = (
-        raw_df.groupby(["Country", "Age_Group"], observed=False)[
-            "Purchase_Amount"
-        ]
-        .sum()
-        .reset_index()
+    # Initial startup screen when no CSV is provided
+    st.info(
+        "👋 **Welcome!** Please upload a customer CSV dataset in the sidebar to generate metrics, deep-dive insights, and SHAP model explanations."
     )
-    top_age_country = age_country.loc[
-        age_country.groupby("Country")["Purchase_Amount"].idxmax()
-    ]
-
-    with col_a:
-        st.write("**Top Spending Age Bracket per Country**")
-        st.dataframe(
-            top_age_country.rename(
-                columns={
-                    "Age_Group": "Top Age Bracket",
-                    "Purchase_Amount": "Total Spend ($)",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # 2. What each country bought the most (Product Category)
-    cat_country = (
-        raw_df.groupby(["Country", "Product_Category"])["Purchase_Amount"]
-        .sum()
-        .reset_index()
-    )
-    top_cat_country = cat_country.loc[
-        cat_country.groupby("Country")["Purchase_Amount"].idxmax()
-    ]
-
-    with col_b:
-        st.write("**Top Product Category per Country**")
-        st.dataframe(
-            top_cat_country.rename(
-                columns={
-                    "Product_Category": "Top Category",
-                    "Purchase_Amount": "Total Spend ($)",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-with tab2:
-    # 3. Account with highest transaction frequency for each category
-    user_cat_freq = (
-        raw_df.groupby(["Product_Category", "User_Name"])["Transaction_ID"]
-        .count()
-        .reset_index()
-    )
-    top_user_per_cat = user_cat_freq.loc[
-        user_cat_freq.groupby("Product_Category")["Transaction_ID"].idxmax()
-    ]
-
-    st.write("**Most Frequent Buyer per Product Category**")
-    st.dataframe(
-        top_user_per_cat.rename(
-            columns={
-                "User_Name": "Top Buyer",
-                "Transaction_ID": "Transaction Count",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-with tab3:
-    # ==========================================
-    # Automated Guidance & Recommendation Engine
-    # ==========================================
-    st.write("### 🤖 Customer Action & Ad Targeting Guidance")
-
-    # Dropdown to evaluate individual accounts
-    selected_user = st.selectbox(
-        "Select Customer Account to Generate Recommendations:",
-        raw_df["User_Name"].unique(),
-    )
-
-    user_data = raw_df[raw_df["User_Name"] == selected_user]
-
-    # Calculate user category preference ratio
-    category_counts = user_data["Product_Category"].value_counts(
-        normalize=True
-    )
-    top_category = category_counts.index[0]
-    top_category_pct = category_counts.iloc[0]
-
-    # Guidance Rules
-    st.info(f"Analyzing behavioral profile for **{selected_user}**...")
-
-    # Rule 1: Category Dominance
-    if top_category_pct >= 0.25:
-        st.success(
-            f"🎯 **Targeted Ad Alert:** Customer spends `{top_category_pct:.1%}` of their budget on **{top_category}**. "
-            f"Action: Increase ad impressions for high-margin items in **{top_category}**."
-        )
-
-    # Rule 2: Promotional / Discount Sensitivity (Flexible Column Check)
-    if "Is_Discounted" in user_data.columns:
-        discount_ratio = user_data["Is_Discounted"].mean()
-        if discount_ratio > 0.5:
-            st.warning(
-                f"🏷️ **Deal-Seeker Profile:** `{discount_ratio:.1%}` of purchases were made using promotions. "
-                f"Action: Enroll customer in automated SMS/Email alerts whenever seasonal sales go live."
-            )
-        else:
-            st.success(
-                "💎 **Full-Price Buyer:** Customer rarely relies on discounts. Action: Target with early-access premium collections."
-            )
-    else:
-        # Fallback message when offer data is not present in the dataset
-        st.caption(
-            "💡 *Note: Upload datasets containing an `Is_Discounted` or `Offer_Code` column to unlock automated sales/deal-sensitivity triggers.*"
-        )
